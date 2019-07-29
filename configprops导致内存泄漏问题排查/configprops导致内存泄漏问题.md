@@ -1,9 +1,9 @@
 # 1. 问题来源
 售电服务`sell-electricity-v1`生产环境在2019年6月12日18:20至22:00和7月4日16:30至19:00两个时间段均出现了频繁Full GC，其中6月12日的监控图形如下：
 
-![图1](/uploads/899d900d6ad27d273fed005eedf18779/图1.png)
+![图1](/configprops导致内存泄漏问题排查/素材/图1.png)
 
-![图2](/uploads/185a6f33471c1f3d59afdd5911cae195/图2.png)
+![图2](/configprops导致内存泄漏问题排查/素材/图2.png)
 
 7月4日的监控图形与之类似，它们共同的特点是：
 
@@ -38,7 +38,7 @@
 ## 3.1. 堆
 `Dominator Tree`显示了异常发生时堆内存中各种对象的内存使用率，如下图所示：
 
-![图3](/uploads/6535b8f111a9f3514f78f0ff1ed5097f/图3.png)
+![图3](/configprops导致内存泄漏问题排查/素材/图3.png)
 
 单个`TokenBuffer`对象就占用了近600MB的内存，占用率达到堆内存总量的**84%**。`TokenBuffer`引用了它的内部类`Segment`的一个链表，`Segment`主要由两部分组成：
 
@@ -69,7 +69,7 @@
 ### 3.2.1. 循环递归调用
 如下图：
 
-![图4](/uploads/31eba83361063fe34c6ef60fed01e7cb/图4.png)
+![图4](/configprops导致内存泄漏问题排查/素材/图4.png)
 
 类似的循环递归调用在栈轨迹中打印了将近10000行，它证实了在此过程中jackson确实在不停地做序列化，且序列化的对象之间存在嵌套关系。栈轨迹的行数表明该过程极有可能已经陷入了死循环，但还没有栈溢出（StackOverflow）
 
@@ -83,7 +83,7 @@
 ### 3.2.3. 触发点
 如下图所示是栈轨迹的最底部，即线程的入口附近：
 
-![图5](/uploads/2046d02c36f55bf530e0744b77ad2d01/图5.png)
+![图5](/configprops导致内存泄漏问题排查/素材/图5.png)
 
 可以看出：
 
@@ -98,17 +98,17 @@
 
 在本地环境调试（debug）售电服务（确保代码和二方包是与生产环境一致），调用`/configprops`，并在结果中检索`mybatis`，得到如下结果：
 
-![图6](/uploads/c85c1b5cf6c0bf4613c48fc4868b1b40/图6.png)
+![图6](/configprops导致内存泄漏问题排查/素材/图6.png)
 
 `tk.mybatis.mapper.autoconfigure.MyBatisProperties`报错，错误信息是：`Cannot serialize 'mybatis'`
 
 尝试在`ConfigurationPropertiesReportEndpoint`中检索该错误信息，发现它位于`safeSerialize`方法中：
 
-![图7](/uploads/ee4121fc765f78b34c5f7b3c0d9578f3/图7.png)
+![图7](/configprops导致内存泄漏问题排查/素材/图7.png)
 
 如上图中对catch中的语句打上断点，再次调用`/configprops`时捕获到异常，打印异常信息如下：
 
-![图8](/uploads/e277884d4b2eb1fda3e2c4d68f310a27/图8.png)
+![图8](/configprops导致内存泄漏问题排查/素材/图8.png)
 
 ## 4.2. 调试XNode
 
@@ -116,17 +116,17 @@
 
 进一步地，在`XNode`类的`getParent`方法中打上断点，如下图：
 
-![图9](/uploads/4063d888c587ac4c657f09d8ed362419/图9.png)
+![图9](/configprops导致内存泄漏问题排查/素材/图9.png)
 
 再次调用后发现，当解析扫描到1次`<sql>`标签后，后续的解析就在同一个xml文件的`<mapper>`标签与`<resultMap>`（即`<mapper>`下的第1个标签，对应了异常信息中的`XNode["children"]->ArrayList[0]`）标签之间不断循环，如下图：
 
-![图10](/uploads/7d3df9bb9ed752e046cd3da46711c393/图10.png)
+![图10](/configprops导致内存泄漏问题排查/素材/图10.png)
 
 进一步调试观察上下文环境发现，每扫描1次`XNode`，jackson的`ObjectMapper`都会根据`XNode`对象的数据生成一个新的`Segment`对象，并存放入`TokenBuffer`中。因而，随着循环递归的进行，`Segment`对象将会越来越多，造成**内存泄漏**
 
 另一方面，在售电服务的项目代码中，去掉所有mybatis mapper xml文件中的`<sql>`标签，再进行调试。结果是tk.mybatis对应的`MyBatisProperties`不再报错且能被正确解析为json字符串，如下图；前述的两个断点也不再被拦截
 
-![图11](/uploads/a345db87ed9fc8f95cc34440c2809b94/图11.png)
+![图11](/configprops导致内存泄漏问题排查/素材/图11.png)
 
 ## 4.3. 小结
 MyBatis的mapper xml文件中如果存在`<sql>`标签，会导致`ConfigurationPropertiesReportEndpoint`在解析时出现父节点调用子节点、子节点又调用父节点的循环递归调用，该调用会生成大量包含了字符串的`Segment`对象，造成内存泄漏
@@ -147,7 +147,7 @@ MyBatis的mapper xml文件中如果存在`<sql>`标签，会导致`Configuration
 
 调用`/configprops`，结果如下：
 
-![图12](/uploads/badf4beaeeadec8c44441b5fe0f0fa09/图12.png)
+![图12](/configprops导致内存泄漏问题排查/素材/图12.png)
 
 可见，org.mybatis对应的`MyBatisProperties`同样报错：`Cannot serialize 'mybatis'`
 
@@ -160,7 +160,7 @@ MyBatis的mapper xml文件中如果存在`<sql>`标签，会导致`Configuration
 
 尝试在return前添加打印栈轨迹的代码，再次调用`/configprops`，打印的栈轨迹截取如下图：
 
-![图13](/uploads/1a33981dfb36028c46631d0aa0f04564/图13.png)
+![图13](/configprops导致内存泄漏问题排查/素材/图13.png)
 
 可见，`StackOverflowError`下的栈轨迹与堆栈分析中的栈轨迹基本是一致的。由此可以推断，复现现象和生产环境的异常实际上是同一个问题
 
@@ -178,13 +178,13 @@ MyBatis的mapper xml文件中如果存在`<sql>`标签，会导致`Configuration
 
 通过排查最终在售电服务的启动命令中发现：
 
-![图14](/uploads/eff936fe74d9d2684fef50d9a5110830/图14.png)
+![图14](/configprops导致内存泄漏问题排查/素材/图14.png)
 
 售电服务通过javaagent参数的形式从外部依赖了`jmx_prometheus_javaagent`插件，通过它来进行kafka的监控，并向Prometheus暴露指标
 
 查阅`jmx_prometheus_javaagent`的[资料](https://github.com/prometheus/jmx_exporter)，发现如下两个配置：
 
-![图15](/uploads/74e13c0afd76916e206101e642d33555/图15.png)
+![图15](/configprops导致内存泄漏问题排查/素材/图15.png)
 
 所以，默认情况下，`jmx_prometheus_javaagent`将查询目标java程序中的所有MBean，即对于Spring Boot Actuator，它将遍历调用所有的endpoint，包括`configprops`
 
@@ -234,18 +234,18 @@ MyBatis的mapper xml文件中如果存在`<sql>`标签，会导致`Configuration
 
 排查相关的代码发现，在最近的git commit中，`chinawyny-starter-web`项目的`MapperConfig`类添加了如下代码：
 
-![图16](/uploads/24a0101fbc745ca8113f3fdfa9e3b008/图16.png)
+![图16](/configprops导致内存泄漏问题排查/素材/图16.png)
 
 既然与数据库连接相关，那么在`DruidDataSource`类的`getConnection()`方法中打上断点，再调用`/configprops`，会发现：该断点被重复拦截到，且每次拦截到时，`DruidDataSource`中的`ConnectCount`均**+1**，如下图；当`ConnectCount`超过一定数量后（开发环境是10），用电服务就会卡死
 
-![图17](/uploads/07d78e0f3d1ec95b86ec4124636feb9a/图17.png)
+![图17](/configprops导致内存泄漏问题排查/素材/图17.png)
 
 深入阅读`DruidDataSource.getConnection()`的源码发现，其每次被调用时都会从数据库连接池中获取一个jdbc连接；如果池中的连接都被占用，则会尝试新建一个。这就解释了数据库连接数为什么一直上涨
 
 ### 9.2.2. 循环递归引用
 在阅读`DruidDataSource`的源码中，另一个发现则是存在循环递归引用，如下图：
 
-![图18](/uploads/58f94375bda2060c97a51dfa3b1f0bcc/图18.png)
+![图18](/configprops导致内存泄漏问题排查/素材/图18.png)
 
 ## 9.3. 结论
 用电服务调用`/configprops`时：
@@ -259,4 +259,4 @@ MyBatis的mapper xml文件中如果存在`<sql>`标签，会导致`Configuration
 * 售电服务发布时，`MapperConfig`类中添加`DruidDataSource`的代码还未提交
 * 此时，`spring.datasource`配置项对应的类不是`DruidDataSource`，而是`org.springframework.boot.autoconfigure.jdbc.DataSourceProperties`（如下图），该类中不存在数据库连接相关的对象
 
-![图19](/uploads/cafe54d8cf1da8957745f899ef2eceab/图19.png)
+![图19](/configprops导致内存泄漏问题排查/素材/图19.png)
